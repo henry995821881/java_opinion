@@ -7,3 +7,11 @@
      保证字段原子性，
      每条数据唯一性
      减少冗余（但是数据库设计时经常增加冗余，：空间换时间）
+
+
+
+3.redis :
+   常用的数据类型 String, Hash(Hashmap),List,Set,Sorted set
+   如果存取java 对象，redis 一般key 用 StringRedisSerializer序列化，目的就是把string变成byte[]保存，反之，
+       然后value java对象 使用JdkSerializationRedisSerializer 序列化，其实就是根据流来转换成byte[]（注意，对象以及对象的属性要实现Serializer接口）,反之
+       也可以自定义序列化util，比如把java 对象转换的json字符串，在转换成byte[] 反之。

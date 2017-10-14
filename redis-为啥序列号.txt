@@ -1,0 +1,237 @@
+猫咪大王
+自定义redis序列化工具
+
+redis一个优点就是可以将数据写入到磁盘中。
+
+我们知道写入磁盘的数据实际上都是以字节（0101这样的二进制数据）的形式写入的。
+
+这意味着如果我们要将一个对象写入磁盘，就必须将这个对象序列化。
+
+java的序列化机制可以参考这篇文章。
+
+可以看到java的反序列是否成功跟serialVersionUID有很大的关系，自动生成的UID在每次编译时就会发生变化。
+
+如果有两个程序共享一个redis，这个时候反序列化就会出现问题。
+
+所以总监叫我自定义个redis序列化工具。
+
+一、为什么Spring redis中缓存的对象需要实现 Serializable 序列化接口
+
+查看RedisTemplate源码，我们可以看到，在RedisTemplate中针对不同类型的数据提供了不同的序列化方式。
+
+默认的序列化方式为JdkSerializationRedisSerializer。
+
+
+
+而我们常用的配置为键采用StringRedisSerializer来序列化，value采用默认的JdkSerializationSerializer。
+
+这里我们首先分析一下这个两个类源码。
+
+1、StringRedisSerializer
+
+复制代码
+public class StringRedisSerializer implements RedisSerializer<String> {
+
+    private final Charset charset;
+
+    public StringRedisSerializer() {
+        this(Charset.forName("UTF8"));
+    }
+
+    public StringRedisSerializer(Charset charset) {
+        Assert.notNull(charset);
+        this.charset = charset;
+    }
+
+    public String deserialize(byte[] bytes) {
+        return (bytes == null ? null : new String(bytes, charset));
+    }
+
+    public byte[] serialize(String string) {
+        return (string == null ? null : string.getBytes(charset));
+    }
+}
+复制代码
+代码很简单，序列化方法就是直接将String转化为byte，反序列化就是直接将byte转化为String。
+
+这里是不涉及serialVersionUID的（没有要求类必须实现Serializable接口）。
+
+那么为什么会有redis缓存的对象必须实现Serializable接口的说法呢？
+
+原因就在默认的序列化方法 JdkSerializationSerializer 中。
+
+2、JdkSerializationSerializer 
+
+复制代码
+public class JdkSerializationRedisSerializer implements RedisSerializer<Object> {
+
+    private Converter<Object, byte[]> serializer = new SerializingConverter();
+    private Converter<byte[], Object> deserializer = new DeserializingConverter();
+
+    public Object deserialize(byte[] bytes) {
+        if (SerializationUtils.isEmpty(bytes)) {
+            return null;
+        }
+
+        try {
+            return deserializer.convert(bytes);
+        } catch (Exception ex) {
+            throw new SerializationException("Cannot deserialize", ex);
+        }
+    }
+
+    public byte[] serialize(Object object) {
+        if (object == null) {
+            return SerializationUtils.EMPTY_ARRAY;
+        }
+        try {
+            return serializer.convert(object);
+        } catch (Exception ex) {
+            throw new SerializationException("Cannot serialize", ex);
+        }
+    }
+}
+复制代码
+上面是JdkSerializationSerializer 的源码。可以看到序列化的时候调用了serializer.convert方法。
+
+下面是serializer.convert方法的源码
+
+复制代码
+public byte[] convert(Object source) {
+        ByteArrayOutputStream byteStream = new ByteArrayOutputStream(256);
+        try  {
+            this.serializer.serialize(source, byteStream);
+            return byteStream.toByteArray();
+        }
+        catch (Throwable ex) {
+            throw new SerializationFailedException("Failed to serialize object using " +
+                    this.serializer.getClass().getSimpleName(), ex);
+        }
+    }
+复制代码
+默认情况下，this.serializer.serialize(source, byteStream)调用的是 DefaultSerializer 下的serialize方法。
+
+复制代码
+public class DefaultSerializer implements Serializer<Object> {
+
+    /**
+     * Writes the source object to an output stream using Java Serialization.
+     * The source object must implement {@link Serializable}.
+     */
+    public void serialize(Object object, OutputStream outputStream) throws IOException {
+        if (!(object instanceof Serializable)) {
+            throw new IllegalArgumentException(getClass().getSimpleName() + " requires a Serializable payload " +
+                    "but received an object of type [" + object.getClass().getName() + "]");
+        }
+        ObjectOutputStream objectOutputStream = new ObjectOutputStream(outputStream);
+        objectOutputStream.writeObject(object);
+        objectOutputStream.flush();
+    }
+
+}
+复制代码
+从上面的代码可以看到DefaultSerializer 下的serialize方法对Object对象的序列化方式是使用ObjectOutputStream 将对象写入到outputStream中的。
+
+下面是ObjectOutputStream 的API。可以看到只有支持 java.io.Serializable 序列化接口的对象才能使用ObjectOutputStream进行写入与读取。
+
+
+
+这就是为什么我们使用redis缓存对象时候需要让对象实现java.io.Serializable 序列化接口的原因。
+
+ 
+
+ 二、定制我们的序列化工具
+
+为了不实现序列化接口，并且缓存到redis中不是难看的字节数据，我定制了自己的序列化工具。
+
+序列化类需要实现 RedisSerializer<Object> 接口，并注册到Spring中。
+
+原理很简单，序列化的时候将对象转换为JSONObject，然后将JSONObject转换为String，最后转化为byte数组。
+
+反序列化的时候，则是将byte数组转化为JSONObject，RedisTemplate从redis中get的对象就是JSONObject类型。
+
+下面是我的代码。
+
+复制代码
+package com.zkxl.fep.redis;
+
+import java.nio.charset.Charset;
+
+import org.springframework.data.redis.serializer.RedisSerializer;
+import org.springframework.data.redis.serializer.SerializationException;
+import org.springframework.util.Assert;
+
+import net.sf.json.JSONObject;
+
+
+public class SerializeUtil implements RedisSerializer<Object>{
+
+    static final byte[] EMPTY_ARRAY = new byte[0];
+    private final Charset charset;
+    
+    public SerializeUtil() {
+        // TODO Auto-generated constructor stub
+        this(Charset.forName("UTF8"));
+    }
+    
+    public SerializeUtil(Charset charset) {
+        // TODO Auto-generated constructor stub
+        Assert.notNull(charset);
+        this.charset = charset;
+    }
+
+    @Override
+    public byte[] serialize(Object object){  //序列化方法
+        // TODO Auto-generated method stub
+        try {
+            JSONObject jsonObject = JSONObject.fromObject(object);
+            String jsonString = jsonObject.toString();
+            return (jsonString == null ? EMPTY_ARRAY : jsonString.getBytes(charset));
+        } catch (Exception e) {
+            // TODO: handle exception
+            e.printStackTrace();
+        }
+        return null;
+        
+    }
+
+    @Override
+    public Object deserialize(byte[] bytes) throws SerializationException { //反序列化
+        // TODO Auto-generated method stub
+        String objectStr = null;
+        Object object = null;
+        if (bytes == null) {
+            return object;
+        }
+        try {
+            objectStr = new String(bytes,charset); //byte数组转换为String
+            JSONObject jsonObject = JSONObject.fromObject(objectStr); //String转化为JSONObject
+            object = jsonObject;  //返回的是JSONObject类型  取数据时候需要再次转换一下
+        } catch (Exception e) {
+            // TODO: handle exception
+            e.printStackTrace();
+        }
+        return object;
+    }
+        
+}
+复制代码
+最后如果要在Spring中使用这个序列化方法我们还需要咋redis的配置文件中注册一下。
+
+复制代码
+<bean id="redisTemplate" class="org.springframework.data.redis.core.RedisTemplate">
+        <property name="connectionFactory" ref="connectionFactory" />
+<!--         键序列化方式 -->
+        <property name="keySerializer">
+            <bean
+                class="org.springframework.data.redis.serializer.StringRedisSerializer" />
+        </property>
+<!--         值序列化方式 -->
+        <property name="valueSerializer">
+<!--             <bean class="org.springframework.data.redis.serializer.StringRedisSerializer" /> -->
+<!--             <bean class="org.springframework.data.redis.serializer.JdkSerializationRedisSerializer" /> -->
+            <bean class="com.zkxl.fep.redis.SerializeUtil"/>
+        </property>
+    </bean>
+复制代码
+大功告成！这样就自定义序列化方式了。
