@@ -1,4 +1,4 @@
-1. logger 很重要， 
+﻿1. logger 很重要， 
    重要操作时（比如：访问数据库，接口调用，复杂逻辑计算，访问缓存，队列访问等等），最好都logger.info()或logger.debug()
    异常的时候，最好在catch中打印出异常信息，logger.error("信息提示"，e)
 
@@ -32,3 +32,10 @@
 6.在线工具 http://tool.oschina.net/
    js,css搜索库地址: http://cdnjs.com 
    比如jquery库，animate.css库。。。
+
+
+
+7.dubbo服务抛异常到消费者，接口要指明抛出的异常，（异常要在接口层），这样消费者才能捕获到，
+否则捕获到的变成runtimeException
+比如API：public User  queryByUsername(String username)throws CustomException;
+
